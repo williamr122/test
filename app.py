@@ -2,20 +2,20 @@ import streamlit as st
 import pandas as pd
 from datetime import datetime
 import os
+import speech_recognition as sr
+import re
+from streamlit_mic_recorder import mic_recorder # LIBRERÍA NUEVA PARA WEB
+import io
 
-# --- CONFIGURACIÓN DE PÁGINA (Estilo App Móvil) ---
-st.set_page_config(
-    page_title="Billi Burgers Manager",
-    page_icon="🍔",
-    layout="centered",
-    initial_sidebar_state="collapsed"
-)
+# --- CONFIGURACIÓN DE PÁGINA ---
+st.set_page_config(page_title="Billi Burgers App", page_icon="🍔", layout="centered")
 
-# --- ESTILOS CSS PERSONALIZADOS ---
+# --- ESTILOS CSS ---
 st.markdown("""
     <style>
-    .big-font { font-size:20px !important; font-weight: bold; }
-    .stMetric { background-color: #f0f2f6; padding: 10px; border-radius: 10px; }
+    .stApp { background-color: #0E1117; color: #FAFAFA; }
+    h1, h2, h3 { color: #FFD700 !important; }
+    div[data-testid="stMetric"] { background-color: #262730; border: 1px solid #FFD700; border-radius: 10px; padding: 10px; }
     </style>
     """, unsafe_allow_html=True)
 
@@ -31,131 +31,101 @@ def cargar_datos(archivo, columnas):
 def guardar_datos(df, archivo):
     df.to_csv(archivo, index=False)
 
-def agregar_fila_total(df, col_suma):
-    """Función auxiliar para agregar la fila de TOTAL al final de una tabla"""
-    if df.empty:
-        return df
+# --- LÓGICA DE INTELIGENCIA ARTIFICIAL ---
+def procesar_audio_web(audio_bytes):
+    r = sr.Recognizer()
     
-    # Crear una fila de totales
-    total_row = {col: '' for col in df.columns}
-    total_row[df.columns[0]] = 'TOTAL GLOBAL'
-    total_row[col_suma] = df[col_suma].sum()
+    # Guardar bytes en un archivo temporal para que speech_recognition lo lea
+    audio_file = io.BytesIO(audio_bytes)
     
-    # Convertir a DataFrame y concatenar
-    df_total = pd.DataFrame([total_row])
-    return pd.concat([df, df_total], ignore_index=True)
+    try:
+        with sr.AudioFile(audio_file) as source:
+            audio_data = r.record(source)
+            texto = r.recognize_google(audio_data, language="es-ES")
+            return texto.lower()
+    except Exception as e:
+        return f"Error: {str(e)}"
 
-# --- TÍTULO PRINCIPAL ---
-st.title("🍔 Billi Burgers System")
+def interpretar_comando(texto):
+    numeros = re.findall(r'\d+', texto)
+    if not numeros: return None, "No detecté dinero."
+    monto = float(numeros[0])
+    
+    tipo = "desconocido"
+    categoria = "Varios"
+    if any(p in texto for p in ['gasté', 'gasto', 'compré', 'pago']):
+        tipo = "gasto"
+        if "empleado" in texto: categoria = "👷 Nómina"
+        elif "carne" in texto or "papas" in texto: categoria = "🛒 Insumos"
+    elif any(p in texto for p in ['vendí', 'venta', 'ingreso']):
+        tipo = "ingreso"
+    
+    return {"tipo": tipo, "monto": monto, "categoria": categoria, "texto": texto}, "OK"
+
+# --- INTERFAZ ---
+st.title("🍔 Billi Burgers Web")
+st.info("⚠️ Aviso: En esta versión Demo, los datos se pueden borrar si la app se reinicia.")
+
+# --- BARRA DE ACCIÓN RÁPIDA (VOZ) ---
+st.subheader("🎙️ Agente de Voz")
+st.caption("Presiona 'Start' para grabar y habla.")
+
+# Componente de grabación web
+audio = mic_recorder(
+    start_prompt="🔴 Grabar",
+    stop_prompt="⏹️ Detener",
+    key='recorder',
+    format="wav" # Importante para speech_recognition
+)
+
+if audio:
+    st.audio(audio['bytes'])
+    texto_detectado = procesar_audio_web(audio['bytes'])
+    
+    if "Error" in texto_detectado:
+        st.error("No pude entender el audio.")
+    else:
+        st.success(f"Escuché: '{texto_detectado}'")
+        datos, msg = interpretar_comando(texto_detectado)
+        
+        if datos:
+            col1, col2 = st.columns(2)
+            with col1:
+                st.metric("Monto detectado", f"${datos['monto']}")
+            with col2:
+                st.metric("Acción", datos['tipo'].upper())
+            
+            if st.button("✅ Confirmar y Guardar"):
+                fecha = datetime.today().strftime('%Y-%m-%d')
+                if datos['tipo'] == 'gasto':
+                    df = cargar_datos(FILE_GASTOS, ['Fecha', 'Categoria', 'Detalle', 'Monto'])
+                    nuevo = pd.DataFrame([{'Fecha': fecha, 'Categoria': datos['categoria'], 'Detalle': datos['texto'], 'Monto': datos['monto']}])
+                    df = pd.concat([df, nuevo], ignore_index=True)
+                    guardar_datos(df, FILE_GASTOS)
+                elif datos['tipo'] == 'ingreso':
+                    df = cargar_datos(FILE_INGRESOS, ['Fecha', 'Dia', 'Monto', 'Notas'])
+                    nuevo = pd.DataFrame([{'Fecha': fecha, 'Dia': 'Voz', 'Monto': datos['monto'], 'Notas': 'Voz'}])
+                    df = pd.concat([df, nuevo], ignore_index=True)
+                    guardar_datos(df, FILE_INGRESOS)
+                st.success("Guardado.")
+                st.rerun()
+
 st.markdown("---")
 
-# --- MENÚ DE NAVEGACIÓN ---
-menu = st.sidebar.radio("Navegación", ["📈 Dashboard (Resumen)", "💰 Registrar Ingreso", "💸 Registrar Gasto"], index=0)
+# --- DASHBOARD Y TABLAS ---
+# (Mismo código de visualización de antes...)
+st.subheader("📊 Resumen")
+df_i = cargar_datos(FILE_INGRESOS, ['Fecha', 'Dia', 'Monto', 'Notas'])
+df_g = cargar_datos(FILE_GASTOS, ['Fecha', 'Categoria', 'Detalle', 'Monto'])
 
-# ==========================================
-# 1. REGISTRAR INGRESO (VENTAS)
-# ==========================================
-if menu == "💰 Registrar Ingreso":
-    st.header("Nueva Venta del Día")
-    st.info("Registra aquí el cierre de caja diario.")
-    
-    with st.form("form_ventas", clear_on_submit=True):
-        fecha = st.date_input("Fecha", datetime.today())
-        dia = fecha.strftime("%A") 
-        monto = st.number_input("Monto Total Recaudado ($)", min_value=0.0, step=0.01, format="%.2f")
-        notas = st.text_area("Observaciones (Ej: Lluvia, Feriado)", height=80)
-        
-        # CORRECCIÓN AQUÍ: width="stretch"
-        btn_guardar = st.form_submit_button("💾 Guardar Venta", width="stretch")
-        
-        if btn_guardar:
-            if monto > 0:
-                cols = ['Fecha', 'Dia', 'Monto', 'Notas']
-                df = cargar_datos(FILE_INGRESOS, cols)
-                nuevo = pd.DataFrame([{'Fecha': fecha, 'Dia': dia, 'Monto': monto, 'Notas': notas}])
-                df = pd.concat([df, nuevo], ignore_index=True)
-                guardar_datos(df, FILE_INGRESOS)
-                st.success("✅ ¡Venta registrada exitosamente!")
-            else:
-                st.error("⚠️ El monto debe ser mayor a 0")
+total_ing = df_i['Monto'].sum() if not df_i.empty else 0.0
+total_gas = df_g['Monto'].sum() if not df_g.empty else 0.0
 
-# ==========================================
-# 2. REGISTRAR GASTO (COMPRAS/NÓMINA)
-# ==========================================
-elif menu == "💸 Registrar Gasto":
-    st.header("Registrar Salida de Dinero")
-    
-    tipo_gasto = st.selectbox("¿Qué tipo de gasto es?", ["🛒 Insumos/Compras", "👷 Nómina (Empleados)", "💡 Servicios/Otros"])
-    
-    with st.form("form_gastos", clear_on_submit=True):
-        fecha_gasto = st.date_input("Fecha", datetime.today())
-        
-        detalle = ""
-        if tipo_gasto == "👷 Nómina (Empleados)":
-            detalle = st.text_input("Nombre del Empleado")
-            etiqueta_monto = "Monto a Pagar ($)"
-        elif tipo_gasto == "🛒 Insumos/Compras":
-            detalle = st.text_input("¿Qué se compró? (Ej: 20lbs Carne)")
-            etiqueta_monto = "Costo de la Compra ($)"
-        else:
-            detalle = st.text_input("Descripción del Gasto")
-            etiqueta_monto = "Monto ($)"
-            
-        monto_gasto = st.number_input(etiqueta_monto, min_value=0.0, step=0.01, format="%.2f")
-        
-        # CORRECCIÓN AQUÍ: width="stretch"
-        btn_gasto = st.form_submit_button("🔻 Registrar Gasto", width="stretch")
-        
-        if btn_gasto:
-            if monto_gasto > 0 and detalle != "":
-                cols = ['Fecha', 'Categoria', 'Detalle', 'Monto']
-                df = cargar_datos(FILE_GASTOS, cols)
-                nuevo = pd.DataFrame([{'Fecha': fecha_gasto, 'Categoria': tipo_gasto, 'Detalle': detalle, 'Monto': monto_gasto}])
-                df = pd.concat([df, nuevo], ignore_index=True)
-                guardar_datos(df, FILE_GASTOS)
-                st.success(f"✅ Gasto '{detalle}' registrado.")
-            else:
-                st.warning("⚠️ Completa todos los campos.")
+c1, c2, c3 = st.columns(3)
+c1.metric("Ingresos", f"${total_ing:,.2f}")
+c2.metric("Gastos", f"${total_gas:,.2f}")
+c3.metric("Ganancia", f"${total_ing-total_gas:,.2f}")
 
-# ==========================================
-# 3. DASHBOARD (RESUMEN)
-# ==========================================
-elif menu == "📈 Dashboard (Resumen)":
-    st.subheader("📊 Estado Financiero")
-    
-    cols_ing = ['Fecha', 'Dia', 'Monto', 'Notas']
-    cols_gas = ['Fecha', 'Categoria', 'Detalle', 'Monto']
-    
-    df_i = cargar_datos(FILE_INGRESOS, cols_ing)
-    df_g = cargar_datos(FILE_GASTOS, cols_gas)
-    
-    total_ing = df_i['Monto'].sum() if not df_i.empty else 0.0
-    total_gas = df_g['Monto'].sum() if not df_g.empty else 0.0
-    balance = total_ing - total_gas
-    
-    col1, col2, col3 = st.columns(3)
-    col1.metric("💰 Ingresos", f"${total_ing:,.2f}")
-    col2.metric("💸 Gastos", f"${total_gas:,.2f}")
-    col3.metric("🏦 Ganancia Real", f"${balance:,.2f}", delta=f"{balance:,.2f}")
-    
-    st.markdown("---")
-    
-    tab1, tab2 = st.tabs(["📂 Detalle de INGRESOS", "📂 Detalle de GASTOS"])
-    
-    with tab1:
-        if not df_i.empty:
-            st.caption("Historial de ventas registradas")
-            df_i_show = agregar_fila_total(df_i, 'Monto')
-            # CORRECCIÓN AQUÍ: width="stretch"
-            st.dataframe(df_i_show, width="stretch", hide_index=True)
-        else:
-            st.info("No hay ventas registradas aún.")
-            
-    with tab2:
-        if not df_g.empty:
-            st.caption("Historial de gastos registrados")
-            df_g_show = agregar_fila_total(df_g, 'Monto')
-            # CORRECCIÓN AQUÍ: width="stretch"
-            st.dataframe(df_g_show, width="stretch", hide_index=True)
-        else:
-            st.info("No hay gastos registrados aún.")
+tab1, tab2 = st.tabs(["Ingresos", "Gastos"])
+with tab1: st.dataframe(df_i, use_container_width=True)
+with tab2: st.dataframe(df_g, use_container_width=True)
