@@ -1,12 +1,12 @@
 import streamlit as st
 import pandas as pd
-from datetime import datetime, timedelta
+from datetime import datetime
 import os
 import re
 import speech_recognition as sr
 from streamlit_mic_recorder import mic_recorder
 import io
-import dateparser # LIBRERÍA NUEVA PARA DETECTAR FECHAS
+import dateparser # Asegúrate de tener: pip install dateparser
 
 # --- CONFIGURACIÓN DE PÁGINA ---
 st.set_page_config(page_title="Billi Burgers ERP", page_icon="🍔", layout="wide")
@@ -16,8 +16,9 @@ st.markdown("""
     <style>
     .stApp { background-color: #0E1117; color: #FAFAFA; }
     h1, h2, h3 { color: #FFD700 !important; }
-    .stButton>button { border-radius: 8px; font-weight: bold; width: 100%; }
-    /* Estilo para la tarjeta de confirmación */
+    /* Ajuste para botones */
+    .stButton>button { border-radius: 8px; font-weight: bold; }
+    /* Tarjeta de confirmación */
     .confirm-card {
         background-color: #1c1e26;
         padding: 20px;
@@ -28,7 +29,7 @@ st.markdown("""
     </style>
     """, unsafe_allow_html=True)
 
-# --- BASE DE DATOS (ARCHIVOS) ---
+# --- GESTIÓN DE ARCHIVOS ---
 FILES = {
     'ingresos': 'ingresos.csv',
     'gastos': 'gastos.csv',
@@ -36,41 +37,39 @@ FILES = {
     'proveedores': 'config_proveedores.csv'
 }
 
-# --- FUNCIONES CRUD (CREATE, READ, UPDATE, DELETE) ---
 def cargar_datos(tipo):
     archivo = FILES[tipo]
     if not os.path.exists(archivo):
-        if tipo == 'empleados': cols = ['Nombre', 'Cargo', 'Sueldo_Base']
-        elif tipo == 'proveedores': cols = ['Empresa', 'Categoria', 'Contacto']
-        elif tipo == 'ingresos': cols = ['Fecha', 'Dia', 'Monto', 'Notas']
-        elif tipo == 'gastos': cols = ['Fecha', 'Categoria', 'Beneficiario', 'Detalle', 'Monto']
-        else: cols = []
-        return pd.DataFrame(columns=cols)
+        # Estructuras base
+        if tipo == 'empleados': return pd.DataFrame(columns=['Nombre', 'Cargo', 'Sueldo_Base'])
+        if tipo == 'proveedores': return pd.DataFrame(columns=['Empresa', 'Categoria', 'Contacto'])
+        if tipo == 'ingresos': return pd.DataFrame(columns=['Fecha', 'Dia', 'Monto', 'Notas'])
+        if tipo == 'gastos': return pd.DataFrame(columns=['Fecha', 'Categoria', 'Beneficiario', 'Detalle', 'Monto'])
+        return pd.DataFrame()
     return pd.read_csv(archivo)
 
 def guardar_datos(df, tipo):
     df.to_csv(FILES[tipo], index=False)
 
-# --- CEREBRO DE LA IA (NLP + FECHAS) ---
+# --- CEREBRO IA (AUDIO + FECHAS) ---
 def procesar_audio(audio_bytes):
     r = sr.Recognizer()
     audio_file = io.BytesIO(audio_bytes)
     try:
         with sr.AudioFile(audio_file) as source:
             audio_data = r.record(source)
-            texto = r.recognize_google(audio_data, language="es-EC") # Español Ecuador
+            # Intentamos español de Ecuador o general
+            texto = r.recognize_google(audio_data, language="es-EC")
             return texto.lower()
     except:
         return "Error"
 
 def extraer_intencion(texto):
-    """Analiza el texto y extrae: Tipo, Monto, Fecha, Detalle"""
-    
-    # 1. Detectar Monto
+    # 1. Monto
     numeros = re.findall(r'\d+[.,]?\d*', texto)
     monto = float(numeros[0].replace(',', '.')) if numeros else 0.0
     
-    # 2. Detectar Tipo (Gasto vs Ingreso)
+    # 2. Tipo
     tipo = "desconocido"
     categoria = "Varios"
     if any(p in texto for p in ['gasté', 'gasto', 'compré', 'pago', 'pagar']):
@@ -80,86 +79,73 @@ def extraer_intencion(texto):
     elif any(p in texto for p in ['vendí', 'venta', 'ingreso', 'cobré']):
         tipo = "ingreso"
 
-    # 3. Detectar Fecha (Usando dateparser para "ayer", "20 de enero", etc.)
-    fecha_detectada = datetime.today() # Por defecto hoy
-    settings = {'DATE_ORDER': 'DMY', 'PREFER_DATES_FROM': 'past', 'RELATIVE_BASE': datetime.today()}
-    
-    # Buscamos patrones de fecha comunes en español
+    # 3. Fecha (dateparser)
+    fecha_detectada = datetime.today()
+    settings = {'DATE_ORDER': 'DMY', 'PREFER_DATES_FROM': 'past'}
     match_fecha = dateparser.search.search_dates(texto, languages=['es'], settings=settings)
     if match_fecha:
-        # dateparser devuelve lista de tuplas (texto_encontrado, objeto_datetime)
-        # Tomamos la última fecha encontrada que suele ser la más relevante
         fecha_detectada = match_fecha[-1][1]
 
-    fecha_str = fecha_detectada.strftime('%Y-%m-%d')
-    dia_str = fecha_detectada.strftime('%A')
-
     return {
-        "tipo": tipo,
-        "monto": monto,
-        "categoria": categoria,
-        "fecha": fecha_str,
-        "dia": dia_str,
-        "detalle": texto, # Guardamos el texto completo como detalle inicial
+        "tipo": tipo, "monto": monto, "categoria": categoria,
+        "fecha": fecha_detectada.strftime('%Y-%m-%d'),
+        "dia": fecha_detectada.strftime('%A'),
         "texto_original": texto
     }
 
 # --- INTERFAZ PRINCIPAL ---
 st.title("🍔 Billi Burgers System AI")
 
-# Menú
 menu = st.sidebar.radio("Navegación", 
-    ["🎙️ Asistente de Voz (IA)", "📊 Historial & CRUD", "💰 Registro Manual", "⚙️ Configuración"], 
+    ["🎙️ Asistente IA", "📊 Historial (CRUD)", "💰 Registro Manual", "⚙️ Configuración"], 
     index=0
 )
 
 # ==============================================================================
-# 1. ASISTENTE DE VOZ CON CONFIRMACIÓN
+# 1. ASISTENTE IA (VOZ)
 # ==============================================================================
-if menu == "🎙️ Asistente de Voz (IA)":
-    st.header("🤖 Asistente Inteligente")
-    st.info("Habla natural. Ej: 'El 20 de enero pagué 50 dólares en carne'")
-    
-    # Variable de estado para guardar la transacción pendiente
+if menu == "🎙️ Asistente IA":
+    st.header("🤖 Asistente de Voz Inteligente")
+    st.info("Ejemplo: 'Ayer gasté 45 dólares en papas'")
+
     if 'transaccion_pendiente' not in st.session_state:
         st.session_state.transaccion_pendiente = None
 
-    # Componente de Micrófono
-    col_mic, col_info = st.columns([1, 3])
+    col_mic, col_x = st.columns([1, 4])
     with col_mic:
-        audio = mic_recorder(start_prompt="🔴 GRABAR", stop_prompt="⏹️ PROCESAR", key='recorder')
+        # Componente de micrófono web
+        audio = mic_recorder(start_prompt="🔴 GRABAR", stop_prompt="⏹️ LISTO", key='recorder')
 
     if audio:
         texto = procesar_audio(audio['bytes'])
         if texto != "Error":
             datos = extraer_intencion(texto)
             if datos['monto'] > 0:
-                st.session_state.transaccion_pendiente = datos # Guardamos en memoria temporal
+                st.session_state.transaccion_pendiente = datos
             else:
-                st.error(f"Entendí: '{texto}', pero no detecté el dinero.")
+                st.error(f"Entendí: '{texto}', pero no escuché el dinero.")
         else:
-            st.warning("No te entendí, intenta de nuevo.")
+            st.warning("No pude entender el audio.")
 
-    # MOSTRAR TARJETA DE CONFIRMACIÓN (Si hay algo pendiente)
+    # TARJETA DE CONFIRMACIÓN
     if st.session_state.transaccion_pendiente:
         pend = st.session_state.transaccion_pendiente
         
         st.markdown(f"""
         <div class="confirm-card">
-            <h3>📢 Confirmación Requerida</h3>
-            <p>He detectado la siguiente operación:</p>
+            <h3>📢 Confirmar Transacción</h3>
             <ul>
                 <li><strong>Acción:</strong> {pend['tipo'].upper()}</li>
                 <li><strong>Fecha:</strong> {pend['fecha']} ({pend['dia']})</li>
                 <li><strong>Monto:</strong> ${pend['monto']}</li>
-                <li><strong>Detalle:</strong> "{pend['texto_original']}"</li>
+                <li><strong>Nota:</strong> "{pend['texto_original']}"</li>
             </ul>
         </div>
         """, unsafe_allow_html=True)
         
         c1, c2 = st.columns(2)
-        if c1.button("✅ SÍ, CONFIRMAR TRANSACCIÓN", type="primary"):
-            # Guardar en base de datos real
+        # Fix: width="stretch" en lugar de use_container_width
+        if c1.button("✅ CONFIRMAR Y GUARDAR", type="primary"):
             if pend['tipo'] == 'gasto':
                 df = cargar_datos('gastos')
                 nuevo = pd.DataFrame([{
@@ -168,7 +154,6 @@ if menu == "🎙️ Asistente de Voz (IA)":
                 }])
                 df = pd.concat([df, nuevo], ignore_index=True)
                 guardar_datos(df, 'gastos')
-            
             elif pend['tipo'] == 'ingreso':
                 df = cargar_datos('ingresos')
                 nuevo = pd.DataFrame([{
@@ -178,64 +163,111 @@ if menu == "🎙️ Asistente de Voz (IA)":
                 df = pd.concat([df, nuevo], ignore_index=True)
                 guardar_datos(df, 'ingresos')
             
-            st.success("¡Transacción Guardada!")
-            st.session_state.transaccion_pendiente = None # Limpiar
+            st.success("Guardado correctamente.")
+            st.session_state.transaccion_pendiente = None
             st.rerun()
             
-        if c2.button("❌ CANCELAR / REINTENTAR"):
+        if c2.button("❌ DESCARTAR"):
             st.session_state.transaccion_pendiente = None
             st.rerun()
 
 # ==============================================================================
-# 2. HISTORIAL Y CRUD (EDITAR / BORRAR)
+# 2. HISTORIAL CRUD (EDITABLE)
 # ==============================================================================
-elif menu == "📊 Historial & CRUD":
-    st.header("📂 Historial de Movimientos")
-    st.caption("Aquí puedes editar celdas directamente o borrar filas. Los cambios se guardan al presionar Enter.")
+elif menu == "📊 Historial (CRUD)":
+    st.header("📂 Base de Datos Interactiva")
+    tab1, tab2 = st.tabs(["Ingresos", "Gastos"])
 
-    tab1, tab2 = st.tabs(["Ingresos (Ventas)", "Gastos (Compras)"])
-
-    # --- CRUD INGRESOS ---
     with tab1:
         df_i = cargar_datos('ingresos')
-        # st.data_editor permite editar. num_rows="dynamic" permite añadir/borrar filas
-        df_i_editado = st.data_editor(
-            df_i, 
-            num_rows="dynamic", 
-            key="editor_ingresos",
-            use_container_width=True
-        )
-        
-        # Botón manual para forzar guardado (aunque data_editor suele actualizar el state)
-        if st.button("💾 Guardar Cambios en Ingresos"):
-            guardar_datos(df_i_editado, 'ingresos')
-            st.success("Base de datos de Ingresos actualizada.")
+        # Fix: width="stretch" para data_editor
+        df_i_edit = st.data_editor(df_i, num_rows="dynamic", key="edit_ing", use_container_width=True)
+        if st.button("💾 Guardar Cambios Ingresos"):
+            guardar_datos(df_i_edit, 'ingresos')
+            st.success("Actualizado.")
 
-    # --- CRUD GASTOS ---
     with tab2:
         df_g = cargar_datos('gastos')
-        df_g_editado = st.data_editor(
-            df_g, 
-            num_rows="dynamic", 
-            key="editor_gastos",
-            use_container_width=True
-        )
-        
-        if st.button("💾 Guardar Cambios en Gastos"):
-            guardar_datos(df_g_editado, 'gastos')
-            st.success("Base de datos de Gastos actualizada.")
+        # Fix: width="stretch" para data_editor
+        df_g_edit = st.data_editor(df_g, num_rows="dynamic", key="edit_gas", use_container_width=True)
+        if st.button("💾 Guardar Cambios Gastos"):
+            guardar_datos(df_g_edit, 'gastos')
+            st.success("Actualizado.")
 
 # ==============================================================================
-# 3. REGISTRO MANUAL Y CONFIGURACIÓN (Mantenemos lo previo)
+# 3. REGISTRO MANUAL (CON MAESTROS)
 # ==============================================================================
 elif menu == "💰 Registro Manual":
-    # (Aquí pegas el código del módulo de registro manual del paso anterior si lo deseas conservar)
-    # Por brevedad, he puesto solo un placeholder, pero puedes copiar/pegar tu código previo.
-    st.header("Registro Manual Tradicional")
-    st.info("Usa esta opción si no quieres usar la voz.")
-    # ... Pega aquí tu código de formularios ...
+    st.header("Registro Manual Detallado")
+    tipo = st.radio("Tipo", ["Ingreso", "Gasto"], horizontal=True)
+    
+    if tipo == "Ingreso":
+        with st.form("form_ing"):
+            fecha = st.date_input("Fecha", datetime.today())
+            monto = st.number_input("Monto ($)", min_value=0.0)
+            notas = st.text_area("Notas")
+            if st.form_submit_button("Guardar"):
+                df = cargar_datos('ingresos')
+                nuevo = pd.DataFrame([{'Fecha': fecha, 'Dia': fecha.strftime("%A"), 'Monto': monto, 'Notas': notas}])
+                df = pd.concat([df, nuevo], ignore_index=True)
+                guardar_datos(df, 'ingresos')
+                st.success("Venta guardada.")
+    else:
+        # Cargar Maestros
+        emps = cargar_datos('empleados')['Nombre'].tolist()
+        provs = cargar_datos('proveedores')['Empresa'].tolist()
+        
+        cat = st.selectbox("Categoría", ["Compra Proveedor", "Nómina", "Otros"])
+        beneficiario = st.text_input("Beneficiario")
+        
+        # Lógica inteligente de autocompletado
+        if cat == "Compra Proveedor" and provs:
+            beneficiario = st.selectbox("Seleccionar Proveedor", provs)
+        elif cat == "Nómina" and emps:
+            beneficiario = st.selectbox("Seleccionar Empleado", emps)
 
+        with st.form("form_gas"):
+            fecha = st.date_input("Fecha", datetime.today())
+            monto = st.number_input("Monto ($)", min_value=0.0)
+            detalle = st.text_input("Detalle")
+            if st.form_submit_button("Guardar Gasto"):
+                df = cargar_datos('gastos')
+                nuevo = pd.DataFrame([{
+                    'Fecha': fecha, 'Categoria': cat, 'Beneficiario': beneficiario, 
+                    'Detalle': detalle, 'Monto': monto
+                }])
+                df = pd.concat([df, nuevo], ignore_index=True)
+                guardar_datos(df, 'gastos')
+                st.success("Gasto guardado.")
+
+# ==============================================================================
+# 4. CONFIGURACIÓN (MAESTROS)
+# ==============================================================================
 elif menu == "⚙️ Configuración":
-    st.header("Configuración de Maestros")
-    # (Código de empleados/proveedores del paso anterior)
-    # ... Pega aquí tu código de config ...
+    st.header("⚙️ Gestión de Maestros")
+    t1, t2 = st.tabs(["Empleados", "Proveedores"])
+    
+    with t1:
+        with st.form("add_emp"):
+            col1, col2 = st.columns(2)
+            nom = col1.text_input("Nombre")
+            sueldo = col2.number_input("Sueldo Base", min_value=0.0)
+            if st.form_submit_button("Agregar Empleado"):
+                df = cargar_datos('empleados')
+                nuevo = pd.DataFrame([{'Nombre': nom, 'Cargo': 'General', 'Sueldo_Base': sueldo}])
+                df = pd.concat([df, nuevo], ignore_index=True)
+                guardar_datos(df, 'empleados')
+                st.success("Empleado agregado.")
+        st.dataframe(cargar_datos('empleados'), use_container_width=True)
+
+    with t2:
+        with st.form("add_prov"):
+            emp = st.text_input("Nombre Empresa")
+            cat = st.text_input("Categoría (Carne, Lacteos...)")
+            if st.form_submit_button("Agregar Proveedor"):
+                df = cargar_datos('proveedores')
+                nuevo = pd.DataFrame([{'Empresa': emp, 'Categoria': cat, 'Contacto': ''}])
+                df = pd.concat([df, nuevo], ignore_index=True)
+                guardar_datos(df, 'proveedores')
+                st.success("Proveedor agregado.")
+        st.dataframe(cargar_datos('proveedores'), use_container_width=True)
