@@ -1,273 +1,298 @@
+
+# ==============================================================================
+# 1. CONFIGURACIÓN Y CONEXIÓN (PON TUS CLAVES AQUÍ)
+# ==============================================================================
 import streamlit as st
 import pandas as pd
-from datetime import datetime
-import os
-import re
+from datetime import datetime, timedelta
 import speech_recognition as sr
 from streamlit_mic_recorder import mic_recorder
 import io
-import dateparser # Asegúrate de tener: pip install dateparser
+import plotly.express as px
+from dateparser.search import search_dates
+import re
+from supabase import create_client, Client
 
-# --- CONFIGURACIÓN DE PÁGINA ---
+# ==============================================================================
+# 1. CONFIGURACIÓN Y CONEXIÓN
+# ==============================================================================
+
+SUPABASE_URL = "https://lzwwztbjregufgqvftsi.supabase.co"
+SUPABASE_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Imx6d3d6dGJqcmVndWZncXZmdHNpIiwicm9sZSI6ImFub24iLCJpYXQiOjE3Njk1NDE3NDIsImV4cCI6MjA4NTExNzc0Mn0.Y95yaYPm6wm-d_6vez_HWyCo9Gy4YEwDL4EZFTD2zBk"
+
+@st.cache_resource
+def init_supabase():
+    return create_client(SUPABASE_URL, SUPABASE_KEY)
+
+try:
+    supabase = init_supabase()
+except:
+    st.error("⚠️ Error conectando a Supabase. Revisa tus claves URL y KEY en el código.")
+    st.stop()
+
 st.set_page_config(page_title="Billi Burgers ERP", page_icon="🍔", layout="wide")
 
-# --- ESTILOS CSS ---
+# ==============================================================================
+# 2. ESTILOS CSS
+# ==============================================================================
 st.markdown("""
     <style>
-    .stApp { background-color: #0E1117; color: #FAFAFA; }
-    h1, h2, h3 { color: #FFD700 !important; }
-    /* Ajuste para botones */
-    .stButton>button { border-radius: 8px; font-weight: bold; }
-    /* Tarjeta de confirmación */
-    .confirm-card {
-        background-color: #1c1e26;
-        padding: 20px;
-        border-left: 5px solid #FFD700;
+    .stApp { background-color: #121212; color: #E0E0E0; }
+    h1, h2, h3 {
+        font-family: 'Segoe UI', sans-serif;
+        color: #FFD700 !important;
+        text-shadow: 0px 0px 10px rgba(255, 215, 0, 0.2);
+    }
+    .stButton>button {
+        background: linear-gradient(135deg, #1F1F1F 0%, #333333 100%);
+        color: #FFD700;
+        border: 1px solid #FFD700;
+        border-radius: 8px;
+        font-weight: bold;
+    }
+    .stButton>button:hover {
+        background: #FFD700;
+        color: #000;
+    }
+    div[data-testid="stMetric"] {
+        background-color: #1E1E1E;
         border-radius: 10px;
-        margin-bottom: 20px;
+        padding: 15px;
+        border-left: 5px solid #FFD700;
     }
     </style>
     """, unsafe_allow_html=True)
 
-# --- GESTIÓN DE ARCHIVOS ---
-FILES = {
-    'ingresos': 'ingresos.csv',
-    'gastos': 'gastos.csv',
-    'empleados': 'config_empleados.csv',
-    'proveedores': 'config_proveedores.csv'
-}
+# ==============================================================================
+# 3. FUNCIONES DE BASE DE DATOS
+# ==============================================================================
+def fetch_data(table, start_date=None, end_date=None):
+    query = supabase.table(table).select("*")
+    if start_date and end_date:
+        query = query.gte("fecha", start_date).lte("fecha", end_date)
+    response = query.execute()
+    return pd.DataFrame(response.data)
 
-def cargar_datos(tipo):
-    archivo = FILES[tipo]
-    if not os.path.exists(archivo):
-        # Estructuras base
-        if tipo == 'empleados': return pd.DataFrame(columns=['Nombre', 'Cargo', 'Sueldo_Base'])
-        if tipo == 'proveedores': return pd.DataFrame(columns=['Empresa', 'Categoria', 'Contacto'])
-        if tipo == 'ingresos': return pd.DataFrame(columns=['Fecha', 'Dia', 'Monto', 'Notas'])
-        if tipo == 'gastos': return pd.DataFrame(columns=['Fecha', 'Categoria', 'Beneficiario', 'Detalle', 'Monto'])
-        return pd.DataFrame()
-    return pd.read_csv(archivo)
+def insert_data(table, data):
+    try:
+        supabase.table(table).insert(data).execute()
+        return True
+    except Exception as e:
+        st.error(f"Error: {e}")
+        return False
 
-def guardar_datos(df, tipo):
-    df.to_csv(FILES[tipo], index=False)
+def upsert_data(table, df_edited):
+    records = df_edited.to_dict('records')
+    try:
+        supabase.table(table).upsert(records).execute()
+        return True
+    except Exception as e:
+        st.error(f"Error al actualizar: {e}")
+        return False
 
-# --- CEREBRO IA (AUDIO + FECHAS) ---
+def delete_data(table, id_valor):
+    try:
+        supabase.table(table).delete().eq("id", id_valor).execute()
+        return True
+    except Exception as e:
+        st.error(f"Error al borrar: {e}")
+        return False
+
+# ==============================================================================
+# 4. INTELIGENCIA ARTIFICIAL
+# ==============================================================================
 def procesar_audio(audio_bytes):
     r = sr.Recognizer()
     audio_file = io.BytesIO(audio_bytes)
     try:
         with sr.AudioFile(audio_file) as source:
             audio_data = r.record(source)
-            # Intentamos español de Ecuador o general
-            texto = r.recognize_google(audio_data, language="es-EC")
-            return texto.lower()
-    except:
-        return "Error"
+            return r.recognize_google(audio_data, language="es-EC").lower()
+    except: return "Error"
 
-def extraer_intencion(texto):
-    # 1. Monto
+def interpretar_intencion(texto):
     numeros = re.findall(r'\d+[.,]?\d*', texto)
     monto = float(numeros[0].replace(',', '.')) if numeros else 0.0
-    
-    # 2. Tipo
-    tipo = "desconocido"
+    tipo = "Ingreso" if any(p in texto for p in ['vendí', 'venta', 'ingreso']) else "Gasto"
     categoria = "Varios"
-    if any(p in texto for p in ['gasté', 'gasto', 'compré', 'pago', 'pagar']):
-        tipo = "gasto"
-        if "empleado" in texto or "sueldo" in texto: categoria = "👷 Pago de Nómina"
-        elif "carne" in texto or "compra" in texto: categoria = "🛒 Compra a Proveedor"
-    elif any(p in texto for p in ['vendí', 'venta', 'ingreso', 'cobré']):
-        tipo = "ingreso"
-
-    # 3. Fecha (dateparser)
-    fecha_detectada = datetime.today()
-    settings = {'DATE_ORDER': 'DMY', 'PREFER_DATES_FROM': 'past'}
-    match_fecha = dateparser.search.search_dates(texto, languages=['es'], settings=settings)
-    if match_fecha:
-        fecha_detectada = match_fecha[-1][1]
-
-    return {
-        "tipo": tipo, "monto": monto, "categoria": categoria,
-        "fecha": fecha_detectada.strftime('%Y-%m-%d'),
-        "dia": fecha_detectada.strftime('%A'),
-        "texto_original": texto
-    }
-
-# --- INTERFAZ PRINCIPAL ---
-st.title("🍔 Billi Burgers System AI")
-
-menu = st.sidebar.radio("Navegación", 
-    ["🎙️ Asistente IA", "📊 Historial (CRUD)", "💰 Registro Manual", "⚙️ Configuración"], 
-    index=0
-)
+    if tipo == "Gasto":
+        if "empleado" in texto or "sueldo" in texto: categoria = "Sueldos"
+        elif "servicio" in texto or "luz" in texto: categoria = "Servicios"
+        else: categoria = "Compras"
+    fecha_str = datetime.today().strftime('%Y-%m-%d')
+    try:
+        settings = {'DATE_ORDER': 'DMY', 'PREFER_DATES_FROM': 'past'}
+        match = search_dates(texto, languages=['es'], settings=settings)
+        if match: fecha_str = match[-1][1].strftime('%Y-%m-%d')
+    except: pass
+    return {"tipo": tipo, "categoria": categoria, "monto": monto, "fecha": fecha_str, "detalle": texto}
 
 # ==============================================================================
-# 1. ASISTENTE IA (VOZ)
+# 5. INTERFAZ PRINCIPAL
 # ==============================================================================
-if menu == "🎙️ Asistente IA":
-    st.header("🤖 Asistente de Voz Inteligente")
-    st.info("Ejemplo: 'Ayer gasté 45 dólares en papas'")
+def main():
+    with st.sidebar:
+        st.header("🍔 MENÚ PRINCIPAL")
+        st.markdown("---")
+        # CORRECCIÓN 1: Agregamos etiqueta "Navegación" y usamos label_visibility="collapsed"
+        menu = st.radio("Navegación", ["📊 Dashboard Ejecutivo", "💰 Transacciones", "⚙️ Configuración (CRUD)", "🎙️ Asistente IA"], label_visibility="collapsed")
+        st.markdown("---")
+        st.caption("Sistema v3.0 - Cloud Connect")
 
-    if 'transaccion_pendiente' not in st.session_state:
-        st.session_state.transaccion_pendiente = None
-
-    col_mic, col_x = st.columns([1, 4])
-    with col_mic:
-        # Componente de micrófono web
-        audio = mic_recorder(start_prompt="🔴 GRABAR", stop_prompt="⏹️ LISTO", key='recorder')
-
-    if audio:
-        texto = procesar_audio(audio['bytes'])
-        if texto != "Error":
-            datos = extraer_intencion(texto)
-            if datos['monto'] > 0:
-                st.session_state.transaccion_pendiente = datos
-            else:
-                st.error(f"Entendí: '{texto}', pero no escuché el dinero.")
+    # 1. DASHBOARD
+    if menu == "📊 Dashboard Ejecutivo":
+        st.title("Tablero de Control Financiero")
+        c1, c2, c3 = st.columns([1, 1, 2])
+        with c1: f_ini = st.date_input("📅 Desde", datetime.today().replace(day=1))
+        with c2: f_fin = st.date_input("📅 Hasta", datetime.today())
+        
+        df = fetch_data("movimientos", f_ini, f_fin)
+        
+        if not df.empty:
+            ing = df[df['tipo'] == 'Ingreso']['monto'].sum()
+            gas = df[df['tipo'] == 'Gasto']['monto'].sum()
+            bal = ing - gas
+            
+            m1, m2, m3 = st.columns(3)
+            m1.metric("Ingresos Totales", f"${ing:,.2f}", "Ventas")
+            m2.metric("Gastos Totales", f"${gas:,.2f}", "-Salidas", delta_color="inverse")
+            m3.metric("Utilidad Neta", f"${bal:,.2f}", "Ganancia")
+            
+            g1, g2 = st.columns(2)
+            with g1:
+                st.subheader("Evolución Financiera")
+                df_trend = df.groupby(['fecha', 'tipo'])['monto'].sum().reset_index()
+                fig = px.bar(df_trend, x='fecha', y='monto', color='tipo', 
+                             color_discrete_map={'Ingreso':'#00CC96', 'Gasto':'#EF553B'},
+                             barmode='group', template="plotly_dark")
+                # CORRECCIÓN 2: width="stretch" (Aunque plotly a veces usa use_container_width, lo dejaremos para evitar el warning específico si streamlit lo intercepta)
+                st.plotly_chart(fig, use_container_width=True) 
+            
+            with g2:
+                st.subheader("Desglose de Gastos")
+                df_g = df[df['tipo'] == 'Gasto']
+                if not df_g.empty:
+                    fig2 = px.pie(df_g, values='monto', names='categoria', hole=0.4, 
+                                  template="plotly_dark", color_discrete_sequence=px.colors.qualitative.Pastel)
+                    st.plotly_chart(fig2, use_container_width=True)
+                else:
+                    st.info("No hay gastos registrados.")
         else:
-            st.warning("No pude entender el audio.")
+            st.info("No hay datos para las fechas seleccionadas.")
 
-    # TARJETA DE CONFIRMACIÓN
-    if st.session_state.transaccion_pendiente:
-        pend = st.session_state.transaccion_pendiente
+    # 2. TRANSACCIONES
+    elif menu == "💰 Transacciones":
+        st.title("Gestión de Operaciones")
+        tab_reg, tab_ver = st.tabs(["➕ Nueva Transacción", "📂 Historial"])
         
-        st.markdown(f"""
-        <div class="confirm-card">
-            <h3>📢 Confirmar Transacción</h3>
-            <ul>
-                <li><strong>Acción:</strong> {pend['tipo'].upper()}</li>
-                <li><strong>Fecha:</strong> {pend['fecha']} ({pend['dia']})</li>
-                <li><strong>Monto:</strong> ${pend['monto']}</li>
-                <li><strong>Nota:</strong> "{pend['texto_original']}"</li>
-            </ul>
-        </div>
-        """, unsafe_allow_html=True)
-        
-        c1, c2 = st.columns(2)
-        # Fix: width="stretch" en lugar de use_container_width
-        if c1.button("✅ CONFIRMAR Y GUARDAR", type="primary"):
-            if pend['tipo'] == 'gasto':
-                df = cargar_datos('gastos')
-                nuevo = pd.DataFrame([{
-                    'Fecha': pend['fecha'], 'Categoria': pend['categoria'], 
-                    'Beneficiario': 'Voz', 'Detalle': pend['texto_original'], 'Monto': pend['monto']
-                }])
-                df = pd.concat([df, nuevo], ignore_index=True)
-                guardar_datos(df, 'gastos')
-            elif pend['tipo'] == 'ingreso':
-                df = cargar_datos('ingresos')
-                nuevo = pd.DataFrame([{
-                    'Fecha': pend['fecha'], 'Dia': pend['dia'], 
-                    'Monto': pend['monto'], 'Notas': pend['texto_original']
-                }])
-                df = pd.concat([df, nuevo], ignore_index=True)
-                guardar_datos(df, 'ingresos')
+        with tab_reg:
+            st.subheader("Registrar Nuevo Movimiento")
+            tipo_trx = st.radio("Tipo de Operación", ["Ingreso", "Gasto"], horizontal=True)
             
-            st.success("Guardado correctamente.")
-            st.session_state.transaccion_pendiente = None
-            st.rerun()
+            with st.form("form_trx"):
+                c1, c2 = st.columns(2)
+                fecha = c1.date_input("Fecha", datetime.today())
+                monto = c2.number_input("Monto ($)", min_value=0.01)
+                
+                cat = "General"
+                ben = "General"
+                det = ""
+                
+                if tipo_trx == "Ingreso":
+                    cat = "Venta"
+                    det = st.text_input("Detalle")
+                else:
+                    subtipo = st.selectbox("Clasificación", ["Compras (Insumos)", "Servicios", "Sueldos"])
+                    cat = subtipo
+                    if subtipo == "Compras (Insumos)":
+                        df_p = fetch_data("proveedores")
+                        l_p = df_p['empresa'].tolist() if not df_p.empty else []
+                        if st.radio("Prov", ["Existente", "Nuevo"], horizontal=True, label_visibility="collapsed") == "Existente":
+                            ben = st.selectbox("Proveedor", l_p) if l_p else st.warning("Crea proveedores primero")
+                        else:
+                            ben = st.text_input("Nuevo Proveedor")
+                        det = st.text_input("Detalle Compra")
+                    elif subtipo == "Sueldos":
+                        df_e = fetch_data("empleados")
+                        l_e = df_e['nombre'].tolist() if not df_e.empty else []
+                        if st.radio("Emp", ["Existente", "Nuevo"], horizontal=True, label_visibility="collapsed") == "Existente":
+                            ben = st.selectbox("Empleado", l_e) if l_e else st.warning("Crea empleados primero")
+                        else:
+                            ben = st.text_input("Nuevo Empleado")
+                        det = st.text_input("Concepto")
+                    else:
+                        ben = st.text_input("Entidad")
+                        det = st.text_input("Descripción")
+
+                # CORRECCIÓN 3: width="stretch" en botón
+                if st.form_submit_button("💾 Guardar Transacción", width="stretch"):
+                    datos = {"fecha": str(fecha), "tipo": tipo_trx, "categoria": cat, "beneficiario": str(ben), "detalle": det, "monto": monto}
+                    if insert_data("movimientos", datos):
+                        st.success("Registrado.")
+                        st.rerun()
+
+        with tab_ver:
+            df_hist = fetch_data("movimientos")
+            if not df_hist.empty:
+                df_hist = df_hist.sort_values(by="fecha", ascending=False)
+                s1, s2, s3 = st.tabs(["🟢 Ingresos", "🔴 Gastos", "📑 Todo"])
+                # CORRECCIÓN 4: width="stretch" en dataframes
+                with s1: st.dataframe(df_hist[df_hist['tipo'] == 'Ingreso'], width="stretch", hide_index=True)
+                with s2: st.dataframe(df_hist[df_hist['tipo'] == 'Gasto'], width="stretch", hide_index=True)
+                with s3: st.dataframe(df_hist, width="stretch", hide_index=True)
+
+    # 3. CONFIGURACIÓN
+    elif menu == "⚙️ Configuración (CRUD)":
+        st.title("Maestros del Sistema")
+        t_e, t_p = st.tabs(["👥 Empleados", "🚚 Proveedores"])
+        
+        with t_e:
+            df_e = fetch_data("empleados")
+            # CORRECCIÓN 5: width="stretch" en editor
+            df_e_ed = st.data_editor(df_e, num_rows="dynamic", key="ed_emp", width="stretch")
+            if st.button("💾 Guardar Empleados", width="stretch"):
+                if upsert_data("empleados", df_e_ed): st.success("Guardado."); st.rerun()
             
-        if c2.button("❌ DESCARTAR"):
-            st.session_state.transaccion_pendiente = None
-            st.rerun()
+            with st.expander("Borrar Empleado"):
+                bid = st.number_input("ID Empleado", min_value=0, step=1)
+                if st.button("Borrar ID", key="del_emp"):
+                    if delete_data("empleados", bid): st.success("Borrado."); st.rerun()
 
-# ==============================================================================
-# 2. HISTORIAL CRUD (EDITABLE)
-# ==============================================================================
-elif menu == "📊 Historial (CRUD)":
-    st.header("📂 Base de Datos Interactiva")
-    tab1, tab2 = st.tabs(["Ingresos", "Gastos"])
+        with t_p:
+            df_p = fetch_data("proveedores")
+            # CORRECCIÓN 6: width="stretch" en editor
+            df_p_ed = st.data_editor(df_p, num_rows="dynamic", key="ed_prov", width="stretch")
+            if st.button("💾 Guardar Proveedores", width="stretch"):
+                if upsert_data("proveedores", df_p_ed): st.success("Guardado."); st.rerun()
+            
+            with st.expander("Borrar Proveedor"):
+                pid = st.number_input("ID Proveedor", min_value=0, step=1)
+                if st.button("Borrar ID", key="del_prov"):
+                    if delete_data("proveedores", pid): st.success("Borrado."); st.rerun()
 
-    with tab1:
-        df_i = cargar_datos('ingresos')
-        # Fix: width="stretch" para data_editor
-        df_i_edit = st.data_editor(df_i, num_rows="dynamic", key="edit_ing", use_container_width=True)
-        if st.button("💾 Guardar Cambios Ingresos"):
-            guardar_datos(df_i_edit, 'ingresos')
-            st.success("Actualizado.")
-
-    with tab2:
-        df_g = cargar_datos('gastos')
-        # Fix: width="stretch" para data_editor
-        df_g_edit = st.data_editor(df_g, num_rows="dynamic", key="edit_gas", use_container_width=True)
-        if st.button("💾 Guardar Cambios Gastos"):
-            guardar_datos(df_g_edit, 'gastos')
-            st.success("Actualizado.")
-
-# ==============================================================================
-# 3. REGISTRO MANUAL (CON MAESTROS)
-# ==============================================================================
-elif menu == "💰 Registro Manual":
-    st.header("Registro Manual Detallado")
-    tipo = st.radio("Tipo", ["Ingreso", "Gasto"], horizontal=True)
-    
-    if tipo == "Ingreso":
-        with st.form("form_ing"):
-            fecha = st.date_input("Fecha", datetime.today())
-            monto = st.number_input("Monto ($)", min_value=0.0)
-            notas = st.text_area("Notas")
-            if st.form_submit_button("Guardar"):
-                df = cargar_datos('ingresos')
-                nuevo = pd.DataFrame([{'Fecha': fecha, 'Dia': fecha.strftime("%A"), 'Monto': monto, 'Notas': notas}])
-                df = pd.concat([df, nuevo], ignore_index=True)
-                guardar_datos(df, 'ingresos')
-                st.success("Venta guardada.")
-    else:
-        # Cargar Maestros
-        emps = cargar_datos('empleados')['Nombre'].tolist()
-        provs = cargar_datos('proveedores')['Empresa'].tolist()
+    # 4. IA
+    elif menu == "🎙️ Asistente IA":
+        st.title("Asistente de Voz")
+        c_mic, _ = st.columns([1, 3])
+        with c_mic:
+            audio = mic_recorder(start_prompt="🔴 HABLAR", stop_prompt="⏹️ PROCESAR", format="wav", key="ia_mic")
         
-        cat = st.selectbox("Categoría", ["Compra Proveedor", "Nómina", "Otros"])
-        beneficiario = st.text_input("Beneficiario")
-        
-        # Lógica inteligente de autocompletado
-        if cat == "Compra Proveedor" and provs:
-            beneficiario = st.selectbox("Seleccionar Proveedor", provs)
-        elif cat == "Nómina" and emps:
-            beneficiario = st.selectbox("Seleccionar Empleado", emps)
+        if audio:
+            txt = procesar_audio(audio['bytes'])
+            if txt != "Error":
+                d = interpretar_intencion(txt)
+                st.markdown(f"""
+                <div style="padding:15px; background:#1E1E1E; border-left:5px solid #FFD700;">
+                    <h3>Confirmar</h3>
+                    <p>"{d['detalle']}"</p>
+                    <hr>
+                    <b>{d['tipo']}</b> | ${d['monto']}
+                </div>
+                """, unsafe_allow_html=True)
+                if st.button("✅ Confirmar", width="stretch"):
+                    dt = {"fecha": d['fecha'], "tipo": d['tipo'], "categoria": d['categoria'], "beneficiario": "Voz IA", "detalle": d['detalle'], "monto": d['monto']}
+                    if insert_data("movimientos", dt): st.success("Guardado en Nube.")
+            else: st.warning("No entendí.")
 
-        with st.form("form_gas"):
-            fecha = st.date_input("Fecha", datetime.today())
-            monto = st.number_input("Monto ($)", min_value=0.0)
-            detalle = st.text_input("Detalle")
-            if st.form_submit_button("Guardar Gasto"):
-                df = cargar_datos('gastos')
-                nuevo = pd.DataFrame([{
-                    'Fecha': fecha, 'Categoria': cat, 'Beneficiario': beneficiario, 
-                    'Detalle': detalle, 'Monto': monto
-                }])
-                df = pd.concat([df, nuevo], ignore_index=True)
-                guardar_datos(df, 'gastos')
-                st.success("Gasto guardado.")
-
-# ==============================================================================
-# 4. CONFIGURACIÓN (MAESTROS)
-# ==============================================================================
-elif menu == "⚙️ Configuración":
-    st.header("⚙️ Gestión de Maestros")
-    t1, t2 = st.tabs(["Empleados", "Proveedores"])
-    
-    with t1:
-        with st.form("add_emp"):
-            col1, col2 = st.columns(2)
-            nom = col1.text_input("Nombre")
-            sueldo = col2.number_input("Sueldo Base", min_value=0.0)
-            if st.form_submit_button("Agregar Empleado"):
-                df = cargar_datos('empleados')
-                nuevo = pd.DataFrame([{'Nombre': nom, 'Cargo': 'General', 'Sueldo_Base': sueldo}])
-                df = pd.concat([df, nuevo], ignore_index=True)
-                guardar_datos(df, 'empleados')
-                st.success("Empleado agregado.")
-        st.dataframe(cargar_datos('empleados'), use_container_width=True)
-
-    with t2:
-        with st.form("add_prov"):
-            emp = st.text_input("Nombre Empresa")
-            cat = st.text_input("Categoría (Carne, Lacteos...)")
-            if st.form_submit_button("Agregar Proveedor"):
-                df = cargar_datos('proveedores')
-                nuevo = pd.DataFrame([{'Empresa': emp, 'Categoria': cat, 'Contacto': ''}])
-                df = pd.concat([df, nuevo], ignore_index=True)
-                guardar_datos(df, 'proveedores')
-                st.success("Proveedor agregado.")
-        st.dataframe(cargar_datos('proveedores'), use_container_width=True)
+if __name__ == "__main__":
+    main()
