@@ -1,5 +1,8 @@
 streamlit
 pandas
+plotly
+supabase
 SpeechRecognition
 streamlit-mic-recorder
-openpyxl
+dateparser
+pyTelegramBotAPI
